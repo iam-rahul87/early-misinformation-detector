@@ -55,61 +55,64 @@ python src/evaluate.py
 
 ## Techniques used
 
-- TF-IDF  
-  Used to convert text into numerical form.
+- TF-IDF :
+  --> Used to convert text into numerical form.
 
-- Cosine Similarity  
-  Helps in matching input text with the knowledge base.
+- Cosine Similarity : 
+  --> Helps in matching input text with the knowledge base.
 
-- RAG (Retrieval-Augmented Generation)  
-  Used for quick lookup-based predictions.
+- RAG (Retrieval-Augmented Generation) :  
+  --> Used for quick lookup-based predictions.
 
-- CNN-style features  
-  Capture local patterns like sensational words.
+- CNN :
+  --> Capture local patterns like sensational words.
 
-- RNN-style features  
-  Capture sequence and flow of text.
+- RNN :
+  --> Capture sequence and flow of text.
 
-- RVNN-style features  
-  Capture structure and syntactic signals.
+- RVNN :  
+  --> Capture structure and syntactic signals.
 
-- MLP Classifier  
-  Final layer that decides whether the text is real or fake.
+- MLP Classifier :
+  --> Final layer that decides whether the text is real or fake.
 
 ---
 
 ## Project structure
 
-```
-src/
-  nn.py
-  model_v3_lazy.py
-  feature_extractors.py
-  rag_module.py
-  knowledge_base.py
-  dataset.py
-  checkpoint.py
-  train.py
-  predict.py
-  evaluate.py
-```
+main/
+    src/
+          nn.py
+          model_v3_lazy.py
+          feature_extractors.py
+          rag_module.py
+          knowledge_base.py
+          dataset.py
+          checkpoint.py
+   train.py
+   predict.py
+   evaluate.py
+   .gitignore
+   requirements.txt
+  
 
+    
 ---
 
 ## Output
 
-The model returns:
-- Prediction (Real / Fake)
-- Probability score
-- Basic routing info (whether it used retrieval or full model)
+The model returns:-
+-> Prediction (Real / Fake)
+-> Probability score
+-> Basic routing info (whether it used retrieval or full model)
 
 ---
 
 ## Notes
 
-- This project is mainly for learning and experimentation.
-- The knowledge base is limited, so results may vary on unseen topics.
-- The architecture can be improved further with better data and tuning.
+-> This project is mainly for learning and experimentation.
+-> The knowledge base is limited, so results may vary on unseen topics.
+-. The architecture can be improved further with better data and tuning.
 
 ---
 
