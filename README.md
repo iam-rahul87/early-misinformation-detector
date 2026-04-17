@@ -1,4 +1,4 @@
-# Early Misinformation Detector
+# Early Misinformation Detection
 
 A simple fake news detector built using Python. Give it any text claim and it will tell you if it's real or fake with a confidence score.
 
