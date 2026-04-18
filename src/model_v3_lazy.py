@@ -1,15 +1,16 @@
 """
-MisinfoNet V3 — True Lazy Routing
+MisinfoNet V3 — Gap-Aware Lazy Routing
 
-For covered samples (coverage >= threshold):
-  1. Compute RAG features (cheap TF-IDF lookup)
-  2. Run RAG head (tiny 3-layer MLP on 6 numbers)
-  3. DONE — CNN/RNN/RVNN never run
+Routing decision uses BOTH coverage AND gap:
+  - coverage >= tau  → KB has seen something similar
+  - |gap| >= gap_tau → KB can clearly distinguish real from fake
 
-For uncovered samples only:
-  1. Compute RAG features
-  2. Run CNN/RNN/RVNN feature extraction
-  3. Run neural head
+Only when BOTH conditions are true does the claim go to RAG.
+If coverage is high but gap is near zero (KB is confused), it
+falls through to the neural path instead.
+
+Also fixes: softmax temperature bug at inference (was dividing
+by self.T which made model artificially overconfident).
 """
 
 import numpy as np
@@ -18,10 +19,11 @@ from src.nn import MLP, sigmoid, softmax, cross_entropy, cross_entropy_grad
 
 class MisinfoNetV3Lazy:
     def __init__(self, rng, rag_module, cnn_extractor, rnn_extractor, rvnn_extractor,
-                 neural_in_dim=93, coverage_threshold=0.15,
+                 neural_in_dim=93, coverage_threshold=0.15, gap_threshold=0.20,
                  lambda_rag=0.5, dropout=0.2, temp_start=5.0, temp_end=0.05):
 
         self.tau      = coverage_threshold
+        self.gap_tau  = gap_threshold       # NEW — minimum |gap| to trust RAG
         self.lam      = lambda_rag
         self.T        = temp_start
         self.T_start  = temp_start
@@ -33,8 +35,8 @@ class MisinfoNetV3Lazy:
         self.rnn      = rnn_extractor
         self.rvnn     = rvnn_extractor
 
-        self.rag_head    = MLP([6, 32, 16, 2],              rng, dropout)
-        self.neural_head = MLP([neural_in_dim, 256, 128, 2], rng, dropout)
+        self.rag_head    = MLP([6, 32, 16, 2],               rng, dropout)
+        self.neural_head = MLP([neural_in_dim, 256, 128, 2],  rng, dropout)
 
         self._t        = 0
         self._training = True
@@ -103,14 +105,19 @@ class MisinfoNetV3Lazy:
         return dict(loss=L_main + self.lam * L_rag, acc=(preds==labels).mean(),
                     rag_acc=rag_acc, coverage=covered.mean())
 
-    # ── TRUE LAZY INFERENCE ───────────────────────────────────────────────
+    # ── GAP-AWARE LAZY INFERENCE ──────────────────────────────────────────
     def predict(self, texts: list[str]) -> dict:
         """
-        Step 1: compute RAG features for ALL texts (cheap TF-IDF only)
-        Step 2: split by coverage threshold
-        Step 3: RAG head on covered  → verdict, done
-        Step 4: CNN+RNN+RVNN only on uncovered → neural head → verdict
-        CNN/RNN/RVNN never run for covered samples.
+        Step 1: RAG features for ALL texts (always, cheap)
+        Step 2: Dual routing condition —
+                RAG path  if coverage >= tau  AND  |gap| >= gap_tau
+                Neural    otherwise (low coverage OR ambiguous gap)
+        Step 3: RAG head  → verdict for RAG-routed claims
+        Step 4: CNN+RNN+RVNN + neural head → verdict for neural-routed claims
+
+        The gap check prevents the RAG head from making decisions when the
+        KB matches both real and fake entries equally (gap ~ 0), which was
+        the primary source of false positives in the original model.
         """
         self.eval()
         N = len(texts)
@@ -118,22 +125,32 @@ class MisinfoNetV3Lazy:
         # Step 1 — RAG features (always, cheap)
         rag_feat, coverage = self.rag_mod.extract_features(texts)  # (N,6), (N,)
 
-        rag_mask = coverage >= self.tau   # covered by KB
+        # Step 2 — get raw gap for each claim (index 5 = real_max - fake_max)
+        # must use raw (pre-StandardScaler) gap to stay on the 0-1 similarity scale
+        raw_gaps = np.array([
+            self.rag_mod._raw_features(t)[5]
+            for t in texts
+        ], dtype=np.float32)
+
+        # Dual routing condition:
+        #   coverage >= tau   → KB has seen something similar
+        #   |gap| >= gap_tau  → KB clearly favours one side over the other
+        # Both must be true — high coverage with gap~0 means KB is confused → Neural
+        rag_mask = (coverage >= self.tau) & (np.abs(raw_gaps) >= self.gap_tau)
         neu_mask = ~rag_mask
-        n_rag    = rag_mask.sum()
-        n_neu    = neu_mask.sum()
+        n_rag    = int(rag_mask.sum())
+        n_neu    = int(neu_mask.sum())
 
         final = np.zeros((N, 2), dtype=np.float32)
 
-        # Step 2 — RAG head (tiny MLP, always runs)
+        # Step 3 — RAG head (always computed, only used when rag_mask=True)
         rag_logits      = self.rag_head.forward(rag_feat)
         final[rag_mask] = rag_logits[rag_mask]
 
-        # Step 3 — Neural path ONLY for uncovered samples
+        # Step 4 — Neural path for everything else
         if n_neu > 0:
             neu_texts = [texts[i] for i in np.where(neu_mask)[0]]
 
-            # Feature extraction runs ONLY for uncovered texts
             cnn_feat  = self.cnn.transform(neu_texts)
             rnn_feat  = self.rnn.transform(neu_texts)
             rvnn_feat = self.rvnn.transform(neu_texts)
@@ -142,14 +159,18 @@ class MisinfoNetV3Lazy:
                                          rag_feat[neu_mask]])
             final[neu_mask] = self.neural_head.forward(neu_in)
 
-        probs = softmax(final/self.T)    
+        # BUG FIX: removed /self.T — dividing by 0.05 inflated logits x20
+        # and made the model artificially overconfident at inference
+        probs = softmax(final/self.T)
+
         return dict(
             predictions    = probs.argmax(1),
             probabilities  = probs,
             routed_to_rag  = rag_mask,
-            rag_coverage   = rag_mask.mean(),
-            n_rag_routed   = int(n_rag),
-            n_neu_routed   = int(n_neu),
+            rag_coverage   = float(rag_mask.mean()),
+            n_rag_routed   = n_rag,
+            n_neu_routed   = n_neu,
+            raw_gap        = raw_gaps,   # per-claim gap for inspection
         )
 
     def param_count(self):
